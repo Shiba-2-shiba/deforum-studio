@@ -16,6 +16,10 @@ torch_package_urls = {
         'linux': 'torch-2.3.0%2Bcu121-cp311-cp311-linux_x86_64.whl',
         'windows': 'torch-2.3.0%2Bcu121-cp311-cp311-win_amd64.whl'
     },
+    '3.12': {
+        'linux': 'torch-2.5.1%2Bcu124-cp312-cp312-linux_x86_64.whl',
+        'windows': 'torch-2.5.1%2Bcu124-cp312-cp312-win_amd64.whl'
+    }
     '3.8': {
         'linux': 'torch-2.3.0%2Bcu121-cp38-cp38-linux_x86_64.whl',
         'windows': 'torch-2.3.0%2Bcu121-cp38-cp38-win_amd64.whl'
@@ -35,6 +39,10 @@ torchvision_package_urls = {
         'linux': 'torchvision-0.18.0%2Bcu121-cp311-cp311-linux_x86_64.whl',
         'windows': 'torchvision-0.18.0%2Bcu121-cp311-cp311-win_amd64.whl'
     },
+    '3.12': {
+        'linux': 'torchvision-0.20.1%2Bcu124-cp312-cp312-linux_x86_64.whl',
+        'windows': 'torchvision-0.20.1%2Bcu124-cp312-cp312-win_amd64.whl'
+    }
     '3.8': {
         'linux': 'torchvision-0.18.0%2Bcu121-cp38-cp38-linux_x86_64.whl',
         'windows': 'torchvision-0.18.0%2Bcu121-cp38-cp38-win_amd64.whl'
@@ -51,8 +59,8 @@ if python_version in torch_package_urls:
 else:
     sys.exit(f"Unsupported Python version: {python_version}")
 
-torch_path = f"https://download.pytorch.org/whl/cu121/{torch_url}"
-torchvision_path = f"https://download.pytorch.org/whl/cu121/{torchvision_url}"
+torch_path = f"https://download.pytorch.org/whl/cu124/{torch_url}"
+torchvision_path = f"https://download.pytorch.org/whl/cu124/{torchvision_url}"
 
 # IMPORTANT:
 # 1. all dependencies should be listed here with their version requirements if any
@@ -268,7 +276,7 @@ setup(
     packages=find_packages("src"),
     # package_data={"deforum": ["py.typed"]},
     include_package_data=True,
-    python_requires=">=3.8.0",
+    python_requires=">=3.8.0, <3.13",
     install_requires=list(install_requires),
     extras_require=extras,
     entry_points={"console_scripts": ["deforum=deforum.commands.deforum_cli:start_deforum_cli",
@@ -285,6 +293,7 @@ setup(
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.12",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     cmdclass={"deps_table_update": DepsTableUpdateCommand},
