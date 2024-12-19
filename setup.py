@@ -19,7 +19,7 @@ torch_package_urls = {
     '3.12': {
         'linux': 'torch-2.5.1%2Bcu124-cp312-cp312-linux_x86_64.whl',
         'windows': 'torch-2.5.1%2Bcu124-cp312-cp312-win_amd64.whl'
-    }
+    },
     '3.8': {
         'linux': 'torch-2.3.0%2Bcu121-cp38-cp38-linux_x86_64.whl',
         'windows': 'torch-2.3.0%2Bcu121-cp38-cp38-win_amd64.whl'
@@ -42,7 +42,7 @@ torchvision_package_urls = {
     '3.12': {
         'linux': 'torchvision-0.20.1%2Bcu124-cp312-cp312-linux_x86_64.whl',
         'windows': 'torchvision-0.20.1%2Bcu124-cp312-cp312-win_amd64.whl'
-    }
+    },
     '3.8': {
         'linux': 'torchvision-0.18.0%2Bcu121-cp38-cp38-linux_x86_64.whl',
         'windows': 'torchvision-0.18.0%2Bcu121-cp38-cp38-win_amd64.whl'
