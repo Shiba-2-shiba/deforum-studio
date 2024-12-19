@@ -1,3 +1,12 @@
+# Fork Version
+
+This repository is designed to test compatibility with Python 3.12 and PyTorch 2.5.1+cu12.4.
+
+To resolve import errors with ComfyUI Deforum nodes, use the following command:
+ ```bash
+pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git  
+ ```
+
 # Deforum
 State-of-the-art Animation Diffusion in PyTorch and TRT.
 
