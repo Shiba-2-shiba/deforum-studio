@@ -121,6 +121,9 @@ _deps = [
     'coverage>=7.5.2',
     'librosa>=0.10.0.post2',
     'contexttimer>=0.3.3',
+    'PyWavelets>=1.1.1',
+    'opensimplex>=0.4.2',
+    'moviepy==1.0.3',
     'pydub>=0.23.0'
 ]
 
@@ -242,6 +245,9 @@ install_requires = deps_list('torch',
                              'pyqtgraph',
                              'librosa',
                              'contexttimer',
+                             'PyWavelets',
+                             'opensimplex',
+                             'moviepy',
                              'pydub'
                              )
 
