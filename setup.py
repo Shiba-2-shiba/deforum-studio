@@ -17,8 +17,8 @@ torch_package_urls = {
         'windows': 'torch-2.3.0%2Bcu121-cp311-cp311-win_amd64.whl'
     },
     '3.12': {
-        'linux': 'torch-2.5.1%2Bcu124-cp312-cp312-linux_x86_64.whl',
-        'windows': 'torch-2.5.1%2Bcu124-cp312-cp312-win_amd64.whl'
+        'linux': 'torch-2.6.0%2Bcu126-cp312-cp312-linux_x86_64.whl',
+        'windows': 'torch-2.6.0%2Bcu126-cp312-cp312-win_amd64.whl'
     },
     '3.8': {
         'linux': 'torch-2.3.0%2Bcu121-cp38-cp38-linux_x86_64.whl',
@@ -39,9 +39,9 @@ torchvision_package_urls = {
         'linux': 'torchvision-0.18.0%2Bcu121-cp311-cp311-linux_x86_64.whl',
         'windows': 'torchvision-0.18.0%2Bcu121-cp311-cp311-win_amd64.whl'
     },
-    '3.12': {
-        'linux': 'torchvision-0.20.1%2Bcu124-cp312-cp312-linux_x86_64.whl',
-        'windows': 'torchvision-0.20.1%2Bcu124-cp312-cp312-win_amd64.whl'
+        '3.12': {
+        'linux': 'torchvision-0.21.0%2Bcu126-cp312-cp312-linux_x86_64.whl',
+        'windows': 'torchvision-0.21.0%2Bcu126-cp312-cp312-win_amd64.whl'
     },
     '3.8': {
         'linux': 'torchvision-0.18.0%2Bcu121-cp38-cp38-linux_x86_64.whl',
@@ -59,8 +59,9 @@ if python_version in torch_package_urls:
 else:
     sys.exit(f"Unsupported Python version: {python_version}")
 
-torch_path = f"https://download.pytorch.org/whl/cu124/{torch_url}"
-torchvision_path = f"https://download.pytorch.org/whl/cu124/{torchvision_url}"
+cuda_version = "cu126" if python_version == "3.12" else "cu124"
+torch_path = f"https://download.pytorch.org/whl/{cuda_version}/{torch_url}"
+torchvision_path = f"https://download.pytorch.org/whl/{cuda_version}/{torchvision_url}"
 
 # IMPORTANT:
 # 1. all dependencies should be listed here with their version requirements if any
