@@ -17,7 +17,7 @@ torch_package_urls = {
         'windows': 'torch-2.3.0%2Bcu121-cp311-cp311-win_amd64.whl'
     },
     '3.12': {
-        'linux': 'torch-2.6.0%2Bcu126-cp312-cp312-linux_x86_64.whl',
+        'linux': 'torch-2.6.0%2Bcu126-cp312-cp312-manylinux_2_28_x86_64.whl',
         'windows': 'torch-2.6.0%2Bcu126-cp312-cp312-win_amd64.whl'
     },
     '3.8': {
