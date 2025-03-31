@@ -339,6 +339,40 @@ def image_transform_perspective(image_cv2, m, depth=None):
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_REFLECT_101
     )
+    
+# image_utils.py に以下の関数定義を追加します
+# 他の画像処理関数 (unsharp_mask など) の近くに追加すると良いでしょう。
+
+def custom_gaussian_blur(input_array, blur_size, sigma):
+    """ Applies Gaussian blur using scipy.ndimage.gaussian_filter. """
+    # Ensure sigma is appropriate for the filter dimensions
+    # sigma=(sigma, sigma, 0) assumes a 3D array (H, W, C) where blur is only applied spatially.
+    # If input_array could be 2D (grayscale), this might need adjustment.
+    try:
+        if input_array.ndim == 3:
+            sigma_tuple = (sigma, sigma, 0)
+        elif input_array.ndim == 2:
+            sigma_tuple = (sigma, sigma)
+        else:
+            logger.error(f"Unsupported array dimension {input_array.ndim} for custom_gaussian_blur.")
+            return input_array # Return original on unsupported dimension
+
+        # truncate parameter relates kernel size to sigma. Default is 4.0
+        # Using blur_size directly might not be the intended use of truncate.
+        # Let's use the default truncate value unless blur_size is specifically meant for it.
+        # truncate=4.0 is standard. If blur_size is intended as kernel pixel size, it's different.
+        # Assuming blur_size here might be intended as the truncate factor for compatibility.
+        truncate_value = float(blur_size) if blur_size is not None else 4.0
+
+        return gaussian_filter(input_array,
+                               sigma=sigma_tuple,
+                               order=0, # order=0 means Gaussian smoothing
+                               mode='constant', # How borders are handled
+                               cval=0.0, # Value for constant border
+                               truncate=truncate_value) # Cut off filter at truncate*sigma standard deviations
+    except Exception as e:
+        logger.error(f"Error during custom_gaussian_blur: {e}")
+        return input_array # Return original on error
 
 
 # MASK FUNCTIONS
