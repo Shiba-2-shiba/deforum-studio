@@ -162,7 +162,7 @@ def maintain_colors(prev_img, color_match_sample, mode):
          return prev_img # Return original on error
 # --- ここまでコメント解除 ---
 
- --- IMAGE FUNCTIONS (Original functions below, plus modified unsharp_mask) ---
+--- IMAGE FUNCTIONS (Original functions below, plus modified unsharp_mask) ---
 
 def load_image(image_path: str):
     if isinstance(image_path, str):
