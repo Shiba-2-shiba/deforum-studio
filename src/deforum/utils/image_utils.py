@@ -110,25 +110,59 @@ def optimized_pixel_diffusion_blend(image1, image2, alpha, cc_mix_outdir=None, t
 
 
 # --- Original maintain_colors (Commented out as logic moved to DeforumColorMatchNode) ---
-# def maintain_colors(prev_img, color_match_sample, mode):
-#     """ Now handled within DeforumColorMatchNode """
-#     logger.warning("maintain_colors function in image_utils is deprecated and commented out.")
-#     # ... (original implementation commented out) ...
-#     # is_skimage_v20_or_higher = True # Assume modern version or handle check differently
-#     # if match_histograms is None:
-#     #      print("Warning: scikit-image not available for maintain_colors.")
-#     #      return prev_img # Return original if skimage missing
-#     #
-#     # match_histograms_kwargs = {'channel_axis': -1} if is_skimage_v20_or_higher else {'multichannel': True}
-#     #
-#     # try:
-#     #     # ... (rest of the original commented code) ...
-#     # except Exception as e:
-#     #      print(f"Error in maintain_colors (mode: {mode}): {e}")
-#     #      return prev_img # Return original on error
-#     return prev_img # Return original image as it's deprecated here
+def maintain_colors(prev_img, color_match_sample, mode):
+    """ Original function, kept for compatibility even if not directly used by the node now. """
+    # is_skimage_v20_or_higher = True # Assume modern version or handle check differently
+    # Check skimage availability (added check)
+    if match_histograms is None:
+         logger.warning("scikit-image not available for maintain_colors.")
+         return prev_img # Return original if skimage missing
 
-# --- IMAGE FUNCTIONS (Original functions below, plus modified unsharp_mask) ---
+    # Check skimage version for kwargs (using self.match_histograms_kwargs might not work here as it's not in a class)
+    # Let's try a simplified check or assume default args
+    match_histograms_kwargs = {'channel_axis': -1} # Assume v0.20+ default
+    try:
+         # Optional: Add version check here if needed, otherwise use default above
+         pass
+    except Exception:
+         match_histograms_kwargs = {'multichannel': True} # Fallback
+
+    try:
+        # Ensure inputs are BGR numpy arrays uint8
+        if not isinstance(prev_img, np.ndarray): prev_img = np.array(prev_img)
+        if not isinstance(color_match_sample, np.ndarray): color_match_sample = np.array(color_match_sample)
+
+        # Ensure uint8 type
+        prev_img_u8 = prev_img.astype(np.uint8)
+        color_match_sample_u8 = color_match_sample.astype(np.uint8)
+
+        # Ensure shapes match (added check)
+        if prev_img_u8.shape != color_match_sample_u8.shape:
+             logger.warning(f"maintain_colors: Shape mismatch {prev_img_u8.shape} vs {color_match_sample_u8.shape}. Resizing sample.")
+             color_match_sample_u8 = cv2.resize(color_match_sample_u8, (prev_img_u8.shape[1], prev_img_u8.shape[0]), interpolation=cv2.INTER_AREA)
+
+
+        if mode == 'RGB':
+             prev_img_rgb = cv2.cvtColor(prev_img_u8, cv2.COLOR_BGR2RGB)
+             color_match_rgb = cv2.cvtColor(color_match_sample_u8, cv2.COLOR_BGR2RGB) # Assume sample needs conversion too
+             matched = match_histograms(prev_img_rgb, color_match_rgb, **match_histograms_kwargs)
+             return cv2.cvtColor(matched.astype(np.uint8), cv2.COLOR_RGB2BGR)
+        elif mode == 'HSV':
+             prev_img_hsv = cv2.cvtColor(prev_img_u8, cv2.COLOR_BGR2HSV)
+             color_match_hsv = cv2.cvtColor(color_match_sample_u8, cv2.COLOR_BGR2HSV)
+             matched_hsv = match_histograms(prev_img_hsv, color_match_hsv, **match_histograms_kwargs)
+             return cv2.cvtColor(matched_hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        else:  # LAB (Default)
+             prev_img_lab = cv2.cvtColor(prev_img_u8, cv2.COLOR_BGR2LAB)
+             color_match_lab = cv2.cvtColor(color_match_sample_u8, cv2.COLOR_BGR2LAB)
+             matched_lab = match_histograms(prev_img_lab, color_match_lab, **match_histograms_kwargs)
+             return cv2.cvtColor(matched_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+    except Exception as e:
+         logger.error(f"Error in original maintain_colors (mode: {mode}): {e}")
+         return prev_img # Return original on error
+# --- ここまでコメント解除 ---
+
+ --- IMAGE FUNCTIONS (Original functions below, plus modified unsharp_mask) ---
 
 def load_image(image_path: str):
     if isinstance(image_path, str):
