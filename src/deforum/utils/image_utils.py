@@ -629,8 +629,7 @@ def unsharp_mask(img, kernel_size=(5, 5), sigma=1.0, amount=1.0, threshold=0, ma
     # kernel_size needs to be odd
     k_h = kernel_size[0] if kernel_size[0] % 2 != 0 else kernel_size[0] + 1
     k_w = kernel_size[1] if kernel_size[1] % 2 != 0 else kernel_size[1] + 1
-    gaussian_blur_transform = TF.gaussian_blur(kernel_size=(k_h, k_w), sigma=sigma) # <-- 名前を小文字に修正 (変数名も変更推奨)
-    blurred_tensor = gaussian_blur_transform(img_tensor)  
+    blurred_tensor = TF.gaussian_blur(img_tensor, kernel_size=(k_h, k_w), sigma=sigma) 
 
     # Calculate sharpened tensor
     # amount = 1.0 means (2 * img - 1 * blurred)
