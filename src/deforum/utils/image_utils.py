@@ -9,71 +9,179 @@ import PIL.Image
 import cv2
 import numpy as np
 import requests
-import torch
-import torchvision.transforms.functional as TF
+import torch # For unsharp_mask and potentially TF adjustments
+import torchvision.transforms.functional as TF # For potential adjustments
 from PIL import (Image, ImageChops, ImageOps)
 
-from scipy.ndimage import gaussian_filter
-from skimage.exposure import match_histograms
+from scipy.ndimage import gaussian_filter # For unsharp_mask (Gaussian Blur part, though cv2 might be used in torch version indirectly)
+try:
+    from skimage.exposure import match_histograms
+except ImportError:
+    print("[Deforum] Warning: scikit-image not available. match_histograms will not work if called directly.")
+    match_histograms = None # Define as None if skimage not available
 
-from .deforum_word_masking_util import get_word_mask
-from .video_frame_utils import get_frame_name
-# from modules.shared import opts
-from ..utils.gradio_utils import clean_gradio_path_strings
+# Assuming these util locations are correct relative to where image_utils.py is
+try:
+    from .deforum_word_masking_util import get_word_mask
+    from .video_frame_utils import get_frame_name
+    from .gradio_utils import clean_gradio_path_strings # Check if this util exists/is needed in ComfyUI context
+    from .logging_config import logger
+except ImportError as e:
+     print(f"[Deforum] Warning: Could not import some local utilities in image_utils.py: {e}")
+     # Define dummy functions or handle missing imports if necessary
+     def get_word_mask(root, frame_image, content): return Image.new('1', frame_image.size, 0) # Dummy
+     def get_frame_name(path): return "frame" # Dummy
+     def clean_gradio_path_strings(p): return p # Dummy
+     class DummyLogger:
+         def info(self, msg): print(f"INFO: {msg}")
+         def warning(self, msg): print(f"WARN: {msg}")
+         def error(self, msg): print(f"ERROR: {msg}")
+     logger = DummyLogger() # Dummy
 
-from deforum.utils.logging_config import logger
 
-# from ainodes_frontend import singleton as gs
 DEBUG_MODE = True
 
 
-# IMAGE FUNCTIONS
+# --- New function from A1111 Deforum ---
+def optimized_pixel_diffusion_blend(image1, image2, alpha, cc_mix_outdir=None, timestring=None, idx=None):
+    """
+    Blends image1 onto image2 using random pixel selection based on alpha.
+    alpha = 1.0 means 100% image1 pixels are kept where mask allows.
+    alpha = 0.0 means 100% image2 pixels are kept where mask allows.
+    Assumes image1 and image2 are NumPy arrays (e.g., BGR uint8).
+    """
+    alpha = min(max(alpha, 0), 1)
+    beta = 1 - alpha # Proportion for image2
 
-def maintain_colors(prev_img, color_match_sample, mode):
-    is_skimage_v20_or_higher = True
+    # Ensure inputs are numpy arrays
+    if not isinstance(image1, np.ndarray):
+        image1 = np.array(image1)
+    if not isinstance(image2, np.ndarray):
+        image2 = np.array(image2)
 
-    match_histograms_kwargs = {'channel_axis': -1} if is_skimage_v20_or_higher else {'multichannel': True}
+    if image1.shape != image2.shape:
+        logger.warning(f"Shape mismatch in optimized_pixel_diffusion_blend: {image1.shape} vs {image2.shape}. Resizing image1.")
+        try:
+            image1 = cv2.resize(image1, (image2.shape[1], image2.shape[0]), interpolation=cv2.INTER_AREA)
+        except Exception as e:
+            logger.error(f"Failed to resize image1 in blend: {e}. Returning image2.")
+            return image2
 
-    if mode == 'RGB':
-        return cv2.cvtColor(match_histograms(cv2.cvtColor(prev_img, cv2.COLOR_BGR2RGB), color_match_sample, **match_histograms_kwargs), cv2.COLOR_RGB2BGR)
-    elif mode == 'HSV':
-        prev_img_hsv = cv2.cvtColor(prev_img, cv2.COLOR_BGR2HSV)
-        color_match_hsv = cv2.cvtColor(color_match_sample, cv2.COLOR_RGB2HSV)
-        matched_hsv = match_histograms(prev_img_hsv, color_match_hsv, **match_histograms_kwargs)
-        return cv2.cvtColor(matched_hsv, cv2.COLOR_HSV2BGR)
-    else:  # LAB
-        prev_img_lab = cv2.cvtColor(prev_img, cv2.COLOR_BGR2LAB)
-        color_match_lab = cv2.cvtColor(color_match_sample, cv2.COLOR_RGB2LAB)
-        matched_lab = match_histograms(prev_img_lab, color_match_lab, **match_histograms_kwargs)
-        return cv2.cvtColor(matched_lab, cv2.COLOR_LAB2BGR)
+    # Create a random matrix the same shape as your image height/width
+    # Ensure it matches the potentially C-contiguous array from cv2
+    h, w = image1.shape[:2]
+    random_matrix = np.random.uniform(0, 1, (h, w))
 
+    # Create masks based on alpha
+    alpha_mask = random_matrix < alpha
+
+    # Initialize result as a copy of image2 (the base image)
+    # Ensure contiguous array for potentially faster assignment
+    result = np.copy(image2)
+
+    # Apply the mask: Where alpha_mask is True, copy pixels from image1
+    # Using np.where for potentially better performance on boolean indexing
+    # result[alpha_mask] = image1[alpha_mask] # Direct boolean indexing
+    # Alternatively using np.where:
+    # This requires broadcasting image1 and image2 correctly if they have color channels
+    if result.ndim == 3 and image1.ndim == 3:
+        alpha_mask_3d = np.stack([alpha_mask]*result.shape[2], axis=-1)
+        result = np.where(alpha_mask_3d, image1, result)
+    elif result.ndim == 2 and image1.ndim == 2: # Grayscale case
+        result = np.where(alpha_mask, image1, result)
+    else: # Fallback or handle error if dimensions mismatch unexpectedly
+         logger.warning("Unexpected dimensions in optimized_pixel_diffusion_blend after mask creation. Using boolean indexing fallback.")
+         result[alpha_mask] = image1[alpha_mask] # Fallback
+
+
+    # Debug/Optional: Save the intermediate blended image
+    if cc_mix_outdir is not None and timestring is not None and idx is not None:
+        try:
+            if not os.path.exists(cc_mix_outdir):
+                os.makedirs(cc_mix_outdir)
+            full_filepath = os.path.join(cc_mix_outdir, f'{timestring}_{idx:09}_cc_blend.jpg')
+            # Ensure result is uint8 for saving
+            cv2.imwrite(full_filepath, result.astype(np.uint8))
+        except Exception as e:
+            logger.error(f"Error saving cc_mix debug image: {e}")
+
+    return result
+# --- End of new function ---
+
+
+# --- Original maintain_colors (Commented out as logic moved to DeforumColorMatchNode) ---
+# def maintain_colors(prev_img, color_match_sample, mode):
+#     """ Now handled within DeforumColorMatchNode """
+#     logger.warning("maintain_colors function in image_utils is deprecated and commented out.")
+#     # ... (original implementation commented out) ...
+#     # is_skimage_v20_or_higher = True # Assume modern version or handle check differently
+#     # if match_histograms is None:
+#     #      print("Warning: scikit-image not available for maintain_colors.")
+#     #      return prev_img # Return original if skimage missing
+#     #
+#     # match_histograms_kwargs = {'channel_axis': -1} if is_skimage_v20_or_higher else {'multichannel': True}
+#     #
+#     # try:
+#     #     # ... (rest of the original commented code) ...
+#     # except Exception as e:
+#     #      print(f"Error in maintain_colors (mode: {mode}): {e}")
+#     #      return prev_img # Return original on error
+#     return prev_img # Return original image as it's deprecated here
+
+# --- IMAGE FUNCTIONS (Original functions below, plus modified unsharp_mask) ---
 
 def load_image(image_path: str):
     if isinstance(image_path, str):
-        image_path = clean_gradio_path_strings(image_path)
+        image_path = clean_gradio_path_strings(image_path) # Keep if needed, might do nothing in comfy
         if image_path.startswith('http://') or image_path.startswith('https://'):
+            logger.info(f"Attempting to load image from URL: {image_path}")
+            # Check internet connection (simple check)
             try:
-                host = socket.gethostbyname("www.google.com")
+                host = socket.gethostbyname("www.google.com") # Or a more reliable host
                 s = socket.create_connection((host, 80), 2)
                 s.close()
-            except:
-                raise ConnectionError(
-                    "There is no active internet connection available - please use local masks and init files only.")
+                logger.info("Internet connection check successful.")
+            except Exception as e:
+                 logger.error(f"No active internet connection detected: {e}")
+                 raise ConnectionError(
+                     "There is no active internet connection available - please use local masks and init files only.")
 
+            # Attempt to download
             try:
-                response = requests.get(image_path, stream=True)
+                response = requests.get(image_path, stream=True, timeout=10) # Added timeout
+                response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             except requests.exceptions.RequestException as e:
-                raise ConnectionError("Failed to download image due to no internet connection. Error: {}".format(e))
-            if response.status_code == 404 or response.status_code != 200:
-                raise ConnectionError("Init image url or mask image url is not valid")
-            image = Image.open(response.raw).convert('RGB')
-        else:
+                logger.error(f"Failed to download image: {e}")
+                raise ConnectionError(f"Failed to download image due to connection error or invalid URL: {e}")
+
+            logger.info(f"Successfully connected to URL. Status code: {response.status_code}")
+            try:
+                 image = Image.open(response.raw).convert('RGB')
+            except Exception as e:
+                 logger.error(f"Failed to open image from downloaded response: {e}")
+                 raise RuntimeError(f"Could not open image from URL {image_path}: {e}")
+
+        else: # Local file path
+            logger.info(f"Attempting to load image from local path: {image_path}")
             if not os.path.exists(image_path):
-                raise RuntimeError("Init image path or mask image path is not valid")
-            image = Image.open(image_path).convert('RGB')
+                 logger.error(f"Image path does not exist: {image_path}")
+                 raise FileNotFoundError(f"Init image path or mask image path is not valid: {image_path}")
+            try:
+                 image = Image.open(image_path).convert('RGB')
+            except Exception as e:
+                 logger.error(f"Failed to open local image file: {e}")
+                 raise RuntimeError(f"Could not open image from local path {image_path}: {e}")
         return image
     elif isinstance(image_path, PIL.Image.Image):
+        logger.info("Input is already a PIL image.")
+        # Ensure it's RGB
+        if image_path.mode != 'RGB':
+            logger.warning(f"Converting PIL image from mode {image_path.mode} to RGB.")
+            return image_path.convert('RGB')
         return image_path
+    else:
+        logger.error(f"Unsupported image_path type: {type(image_path)}")
+        raise TypeError(f"load_image expects a string path or PIL image, got {type(image_path)}")
 
 
 def blank_if_none(mask, w, h, mode):
@@ -81,558 +189,1028 @@ def blank_if_none(mask, w, h, mode):
 
 
 def none_if_blank(mask):
-    return None if mask.getextrema() == (0, 0) else mask
+    if mask is None: return None
+    try:
+        extrema = mask.getextrema()
+        # Check for single band (L, 1) or multi-band images where all bands are blank
+        if isinstance(extrema, tuple): # Single band
+            if extrema == (0, 0): return None
+        elif isinstance(extrema, list): # Multi-band
+            if all(ex == (0, 0) for ex in extrema): return None
+    except Exception as e:
+        logger.warning(f"Could not get extrema for mask check: {e}")
+    return mask
 
 
-def get_resized_image_from_filename(im, dimensions):
-    img = cv2.imread(im)
+def get_resized_image_from_filename(im_path, dimensions):
+    img = cv2.imread(im_path)
+    if img is None:
+        logger.error(f"Could not read image file: {im_path}")
+        return None
     return cv2.resize(img, (dimensions[0], dimensions[1]), cv2.INTER_AREA)
 
 
 def center_crop_image(img, w, h):
-    y, x, _ = img.shape
-    width_indent = int((x - w) / 2)
-    height_indent = int((y - h) / 2)
-    cropped_img = img[height_indent:y - height_indent, width_indent:x - width_indent]
+    y, x = img.shape[:2] # Works for color and grayscale
+    start_x = max(0, x // 2 - w // 2)
+    start_y = max(0, y // 2 - h // 2)
+    end_x = min(x, start_x + w)
+    end_y = min(y, start_y + h)
+    cropped_img = img[start_y:end_y, start_x:end_x]
+    # Optional: Pad if crop is smaller than target (e.g., if original image was smaller)
+    # This might be needed depending on how it's used.
+    # Example padding:
+    # if cropped_img.shape[1] < w or cropped_img.shape[0] < h:
+    #     pad_x = (w - cropped_img.shape[1]) // 2
+    #     pad_y = (h - cropped_img.shape[0]) // 2
+    #     pad_x_rem = w - cropped_img.shape[1] - pad_x
+    #     pad_y_rem = h - cropped_img.shape[0] - pad_y
+    #     cropped_img = cv2.copyMakeBorder(cropped_img, pad_y, pad_y_rem, pad_x, pad_x_rem, cv2.BORDER_CONSTANT, value=[0,0,0]) # Adjust value as needed
     return cropped_img
 
 
-def autocontrast_grayscale(image, low_cutoff=0, high_cutoff=100):
-    # Perform autocontrast on a grayscale np array image.
-    # Find the minimum and maximum values in the image
-    min_val = np.percentile(image, low_cutoff)
-    max_val = np.percentile(image, high_cutoff)
+def autocontrast_grayscale(image, low_cutoff=0.0, high_cutoff=100.0):
+    """ Performs autocontrast on a grayscale NumPy array image. """
+    if image.ndim != 2:
+        logger.warning("autocontrast_grayscale expects a 2D grayscale image.")
+        return image # Return original if not grayscale
+    try:
+        min_val = np.percentile(image, low_cutoff)
+        max_val = np.percentile(image, high_cutoff)
 
-    # Scale the image so that the minimum value is 0 and the maximum value is 255
-    image = 255 * (image - min_val) / (max_val - min_val)
+        if max_val == min_val: # Avoid division by zero if image is flat
+            logger.info("Image has zero contrast range.")
+            # Return 0, 128, or 255 depending on preference for flat images
+            return np.full_like(image, 128, dtype=np.uint8)
 
-    # Clip values that fall outside the range [0, 255]
-    image = np.clip(image, 0, 255)
+        # Scale the image
+        # Use floating point for calculations to avoid precision issues
+        image_float = image.astype(np.float32)
+        scaled_image = 255.0 * (image_float - min_val) / (max_val - min_val)
 
-    return image
+        # Clip values and convert back to uint8
+        image_uint8 = np.clip(scaled_image, 0, 255).astype(np.uint8)
+        return image_uint8
+    except Exception as e:
+        logger.error(f"Error during autocontrast_grayscale: {e}")
+        return image # Return original on error
 
 
 def image_transform_ransac(image_cv2, m, hybrid_motion, depth=None):
+    # RANSAC usually finds a perspective or affine matrix 'm'
+    # This function just applies it. The RANSAC calculation happens elsewhere.
     if hybrid_motion == "Perspective":
         return image_transform_perspective(image_cv2, m, depth)
-    else:  # Affine
+    else:  # Affine or other (assume Affine as fallback)
         return image_transform_affine(image_cv2, m, depth)
 
 
 def image_transform_optical_flow(img, flow, flow_factor):
-    # if flow factor not normal, calculate flow factor
-    if flow_factor != 1:
-        flow = flow * flow_factor
-    # flow is reversed, so you need to reverse it:
-    flow = -flow
+    """ Applies optical flow warping to an image. Assumes flow is [H, W, 2] """
+    if img is None or flow is None:
+        logger.warning("image_transform_optical_flow received None input.")
+        return img
+
     h, w = img.shape[:2]
-    flow[:, :, 0] += np.arange(w)
-    flow[:, :, 1] += np.arange(h)[:, np.newaxis]
-    return remap(img, flow)
+    flow_h, flow_w = flow.shape[:2]
+
+    if h != flow_h or w != flow_w:
+         logger.warning(f"Image shape {img.shape[:2]} and flow shape {flow.shape[:2]} mismatch. Resizing flow.")
+         flow = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR)
+         # Resizing flow might require scaling the flow vectors too, this depends on the algorithm.
+         # Simple resize might be incorrect. Assuming flow vectors scale with resize for now.
+         flow[:,:,0] *= (w / flow_w)
+         flow[:,:,1] *= (h / flow_h)
+
+
+    # Apply flow factor
+    if flow_factor != 1.0:
+        flow = flow * flow_factor
+
+    # Flow represents where each pixel *comes from*.
+    # Remap needs the absolute source coordinate for each destination pixel.
+    # Create grid of destination coordinates
+    grid_x, grid_y = np.meshgrid(np.arange(w), np.arange(h))
+    map_x = grid_x.astype(np.float32) + flow[:, :, 0]
+    map_y = grid_y.astype(np.float32) + flow[:, :, 1]
+
+    # Perform the remapping
+    # cv2.BORDER_REFLECT_101 is often good for seamless borders
+    remapped_img = cv2.remap(img, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+    return remapped_img
 
 
 def image_transform_affine(image_cv2, m, depth=None):
-    if depth is None:
-        return cv2.warpAffine(
-            image_cv2,
-            m,
-            (image_cv2.shape[1], image_cv2.shape[0]),
-            borderMode=cv2.BORDER_REFLECT_101
-        )
-    else:  # NEED TO IMPLEMENT THE FOLLOWING FUNCTION
+    if depth is not None:
+         logger.warning("Depth-based affine warp not implemented. Using standard warp.")
+         # Implement depth-based warp here if needed
+         # return depth_based_affine_warp(image_cv2, depth, m)
+
+    if m is None:
+        logger.warning("Affine matrix 'm' is None. Returning original image.")
         return image_cv2
-        # return depth_based_affine_warp(
-        #     image_cv2,
-        #     depth,
-        #     M
-        # )
+
+    # Standard affine warp
+    return cv2.warpAffine(
+        image_cv2,
+        m, # Should be a 2x3 matrix
+        (image_cv2.shape[1], image_cv2.shape[0]), # (width, height)
+        flags=cv2.INTER_LINEAR, # Linear interpolation is common
+        borderMode=cv2.BORDER_REFLECT_101 # Reflect pixels at border
+    )
 
 
 def image_transform_perspective(image_cv2, m, depth=None):
-    if depth is None:
-        return cv2.warpPerspective(
-            image_cv2,
-            m,
-            (image_cv2.shape[1], image_cv2.shape[0]),
-            borderMode=cv2.BORDER_REFLECT_101
-        )
-    else:
-        return image_cv2  # NEED TO IMPLEMENT THE FOLLOWING FUNCTION
-        # return render_3d_perspective(
-        #     image_cv2,
-        #     depth,
-        #     M
-        # )
+    if depth is not None:
+         logger.warning("Depth-based perspective warp not implemented. Using standard warp.")
+         # Implement 3D perspective render here if needed
+         # return render_3d_perspective(image_cv2, depth, m)
 
+    if m is None:
+        logger.warning("Perspective matrix 'm' is None. Returning original image.")
+        return image_cv2
 
-def custom_gaussian_blur(input_array, blur_size, sigma):
-    return gaussian_filter(input_array, sigma=(sigma, sigma, 0), order=0, mode='constant', cval=0.0, truncate=blur_size)
+    # Standard perspective warp
+    return cv2.warpPerspective(
+        image_cv2,
+        m, # Should be a 3x3 matrix
+        (image_cv2.shape[1], image_cv2.shape[0]), # (width, height)
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REFLECT_101
+    )
 
 
 # MASK FUNCTIONS
 
 def load_image_with_mask(path: str, shape=None, use_alpha_as_mask=False):
-    # use_alpha_as_mask: Read the alpha channel of the image as the mask image
-    image = load_image(path)
-    if use_alpha_as_mask:
-        image = image.convert('RGBA')
-    else:
-        image = image.convert('RGB')
-
-    if shape is not None:
-        image = image.resize(shape, resample=Image.LANCZOS)
+    # Load the base image (using our robust load_image function)
+    try:
+        image = load_image(path)
+    except (FileNotFoundError, ConnectionError, RuntimeError, TypeError) as e:
+        logger.error(f"Failed to load base image in load_image_with_mask: {e}")
+        return None, None # Return None for both if base image fails
 
     mask_image = None
-    if use_alpha_as_mask:
-        # Split alpha channel into a mask_image
-        red, green, blue, alpha = Image.Image.split(image)
-        mask_image = alpha.convert('L')
-        image = image.convert('RGB')
 
-        # check using init image alpha as mask if mask is not blank
-        extrema = mask_image.getextrema()
-        if (extrema == (0, 0)) or extrema == (255, 255):
-            logger.info(
-                "use_alpha_as_mask==True: Using the alpha channel from the init image as a mask, but the alpha "
-                "channel is blank.")
-            logger.info("ignoring alpha as mask.")
-            mask_image = None
+    if use_alpha_as_mask:
+        # Try reloading with alpha channel if PIL image supports it
+        # Note: load_image currently forces RGB, so need to reload or handle differently
+        logger.info("Trying to reload image to get alpha channel for mask.")
+        try:
+             # Reload specifically asking for RGBA if possible
+             if isinstance(path, str):
+                 if not path.startswith('http'): # Reload local file if possible
+                     img_with_alpha = Image.open(path)
+                     if img_with_alpha.mode == 'RGBA':
+                         logger.info("Successfully loaded RGBA image.")
+                         image = img_with_alpha.convert('RGB') # Keep the RGB version loaded earlier or convert again
+                         mask_image = img_with_alpha.split()[-1].convert('L')
+                     else:
+                         logger.warning(f"Image at {path} does not have an alpha channel (mode: {img_with_alpha.mode}). Cannot use alpha as mask.")
+                 else:
+                      logger.warning("Cannot reliably reload URL image to check for alpha channel. Ignoring use_alpha_as_mask for URL.")
+             elif isinstance(path, PIL.Image.Image):
+                  if path.mode == 'RGBA':
+                      logger.info("Input PIL image has alpha channel.")
+                      image = path.convert('RGB')
+                      mask_image = path.split()[-1].convert('L')
+                  else:
+                      logger.warning(f"Input PIL image does not have alpha channel (mode: {path.mode}). Cannot use alpha as mask.")
+
+        except Exception as e:
+             logger.error(f"Error trying to load/access alpha channel: {e}")
+
+    # Resize image and mask if shape is provided
+    if shape is not None:
+        logger.info(f"Resizing image to {shape}.")
+        image = image.resize(shape, resample=Image.LANCZOS)
+        if mask_image is not None:
+            logger.info(f"Resizing mask to {shape}.")
+            mask_image = mask_image.resize(shape, resample=Image.LANCZOS) # Use LANCZOS for mask too? Maybe NEAREST is better?
+
+    # Check if mask is blank after potential loading/resizing
+    if mask_image is not None:
+         mask_image = none_if_blank(mask_image)
+         if mask_image is None:
+              logger.info("Mask derived from alpha channel is blank. Discarding mask.")
+
 
     return image, mask_image
 
 
 def prepare_mask(mask_input, mask_shape, mask_brightness_adjust=1.0, mask_contrast_adjust=1.0):
-    """
-    prepares mask for use in webui
-    """
-    if isinstance(mask_input, Image.Image):
-        mask = mask_input
-    else:
-        mask = load_image(mask_input)
-    mask = mask.resize(mask_shape, resample=Image.LANCZOS)
-    # TODO I've added the tensor and back conversion, need to check if it works as intended (mix)
-    if mask_brightness_adjust != 1:
-        mask = TF.adjust_brightness(img=torch.from_numpy(np.array(mask)), brightness_factor=mask_brightness_adjust)
-        mask = Image.fromarray(np.array(mask))
-    if mask_contrast_adjust != 1:
-        mask = TF.adjust_contrast(torch.from_numpy(np.array(mask)), mask_contrast_adjust)
-        mask = Image.fromarray(np.array(mask))
-    mask = mask.convert('L')
+    """ Prepares mask for use: loads, resizes, adjusts, converts to L. """
+    if mask_input is None:
+        logger.warning("prepare_mask received None input.")
+        # Return a default blank mask matching the shape
+        return Image.new('L', mask_shape, 0)
+
+    try:
+        if isinstance(mask_input, Image.Image):
+            mask = mask_input
+        else: # Assume string path
+            mask = load_image(mask_input) # load_image returns RGB, need L
+    except Exception as e:
+        logger.error(f"Failed to load mask input '{mask_input}': {e}")
+        # Return a default blank mask on load failure
+        return Image.new('L', mask_shape, 0)
+
+    # Convert to Grayscale ('L') before adjustments
+    if mask.mode != 'L':
+        mask = mask.convert('L')
+
+    # Resize
+    if mask.size != mask_shape:
+        mask = mask.resize(mask_shape, resample=Image.LANCZOS) # Or Image.NEAREST for masks?
+
+    # Adjustments (Using PIL ImageOps for simplicity, TF requires tensor conversion)
+    # Brightness/Contrast on masks can be tricky. Usually thresholding is preferred.
+    # Applying these adjustments might make binary masks non-binary.
+    # Consider if simple thresholding is better than brightness/contrast.
+    if mask_brightness_adjust != 1.0:
+        logger.warning("Applying brightness adjustment to mask. This might yield non-binary results.")
+        # PIL Brightness: factor > 1 increases, < 1 decreases
+        enhancer = ImageEnhance.Brightness(mask)
+        mask = enhancer.enhance(mask_brightness_adjust)
+
+    if mask_contrast_adjust != 1.0:
+        logger.warning("Applying contrast adjustment to mask. This might yield non-binary results.")
+        # PIL Contrast: factor > 1 increases, < 1 decreases
+        enhancer = ImageEnhance.Contrast(mask)
+        mask = enhancer.enhance(mask_contrast_adjust)
+
+    # Ensure it's still 'L' mode after potential enhancements
+    if mask.mode != 'L':
+        mask = mask.convert('L')
+
+    # Optional: Binarize the mask after adjustments if needed
+    # threshold_value = 128
+    # mask = mask.point(lambda p: 255 if p > threshold_value else 0, 'L')
+
     return mask
 
-
-# "check_mask_for_errors" may have prevented errors in composable masks,
-# but it CAUSES errors on any frame where it's all black.
-# Bypassing the check below until we can fix it even better.
-# This may break composable masks, but it makes ACTUAL masks usable.
+# Check mask function (simplified - primarily checks if it's completely black)
+# The original comment mentioned issues with all-black masks being rejected.
+# This version logs if it's all black but doesn't reject it outright.
 def check_mask_for_errors(mask_input, invert_mask=False):
-    extrema = mask_input.getextrema()
-    if invert_mask:
-        if extrema == (255, 255):
-            logger.info("after inverting mask will be blank. ignoring mask")
-            return None
-    elif extrema == (0, 0):
-        logger.info("mask is blank. ignoring mask")
+    if mask_input is None:
+        logger.info("Mask check: Input is None.")
         return None
-    else:
-        return mask_input
+    try:
+        extrema = mask_input.getextrema()
+        is_blank = False
+        if isinstance(extrema, tuple): # L mode
+            if extrema == (0, 0): is_blank = True
+            if extrema == (255, 255): is_blank = True # Also check if all white
+        # Add checks for other modes if necessary
+
+        if invert_mask:
+            if extrema == (255, 255): # If all white, inverting makes it all black
+                 logger.info("Mask check: Mask is all white and will be inverted to all black.")
+            elif extrema == (0,0): # If all black, inverting makes it all white
+                 logger.info("Mask check: Mask is all black and will be inverted to all white.")
+        else:
+            if is_blank:
+                logger.info("Mask check: Mask is entirely black (or white).")
+
+    except Exception as e:
+        logger.warning(f"Could not get extrema for mask check: {e}")
+
+    # Return the mask regardless, let downstream decide how to handle blank masks
+    return mask_input
 
 
 def get_mask(args):
-    # return check_mask_for_errors(
-    #     prepare_mask(args.mask_file, (args.width, args.height), args.mask_contrast_adjust, args.mask_brightness_adjust)
-    # )
-    return prepare_mask(args.mask_file, (args.width, args.height), args.mask_contrast_adjust, args.mask_brightness_adjust)
+    """ Helper to get mask based on args object """
+    mask_file = getattr(args, 'mask_file', None)
+    width = getattr(args, 'width', 512)
+    height = getattr(args, 'height', 512)
+    mask_brightness = getattr(args, 'mask_brightness_adjust', 1.0)
+    mask_contrast = getattr(args, 'mask_contrast_adjust', 1.0)
+    invert = getattr(args, 'invert_mask', False) # Needed for check_mask
+
+    if mask_file is None:
+        logger.info("No mask_file specified in args.")
+        return None
+
+    prepared_mask = prepare_mask(mask_file, (width, height), mask_brightness, mask_contrast)
+    # checked_mask = check_mask_for_errors(prepared_mask, invert) # Check but don't reject
+    # return checked_mask
+    return prepared_mask # Return prepared mask, let caller handle inversion/checking if needed
 
 
 def get_mask_from_file(mask_file, args):
-    # return check_mask_for_errors(
-    #     prepare_mask(mask_file, (args.width, args.height), args.mask_contrast_adjust, args.mask_brightness_adjust)
-    # )
-    return prepare_mask(mask_file, (args.width, args.height), args.mask_contrast_adjust, args.mask_brightness_adjust)
+    """ Helper to get mask from a specific file path using args for settings """
+    width = getattr(args, 'width', 512)
+    height = getattr(args, 'height', 512)
+    mask_brightness = getattr(args, 'mask_brightness_adjust', 1.0)
+    mask_contrast = getattr(args, 'mask_contrast_adjust', 1.0)
+    invert = getattr(args, 'invert_mask', False) # Needed for check_mask
+
+    if mask_file is None or not isinstance(mask_file, str):
+        logger.warning(f"Invalid mask_file path: {mask_file}")
+        return None
+
+    prepared_mask = prepare_mask(mask_file, (width, height), mask_brightness, mask_contrast)
+    # checked_mask = check_mask_for_errors(prepared_mask, invert)
+    # return checked_mask
+    return prepared_mask
 
 
-# def unsharp_mask(img, kernel_size=(5, 5), sigma=1.0, amount=1.0, threshold=0, mask=None):
-#     if amount == 0:
-#         return img
-#     # Return a sharpened version of the image, using an unsharp mask.
-#     # If mask is not None, only areas under mask are handled
-#     blurred = cv2.GaussianBlur(img, kernel_size, sigma)
-#     sharpened = float(amount + 1) * img - float(amount) * blurred
-#     sharpened = np.maximum(sharpened, np.zeros(sharpened.shape))
-#     sharpened = np.minimum(sharpened, 255 * np.ones(sharpened.shape))
-#     sharpened = sharpened.round().astype(np.uint8)
-#     if threshold > 0:
-#         low_contrast_mask = np.absolute(img - blurred) < threshold
-#         np.copyto(sharpened, img, where=low_contrast_mask)
-#     if mask is not None:
-#         mask = np.array(mask)
-#         masked_sharpened = cv2.bitwise_and(sharpened, sharpened, mask=mask)
-#         masked_img = cv2.bitwise_and(img, img, mask=255 - mask)
-#         sharpened = cv2.add(masked_img, masked_sharpened)
-#     return sharpened
+# --- Unsharp Mask (Using Torch version from previous response) ---
+from PIL import ImageEnhance # Needed for prepare_mask adjustments
 
 def unsharp_mask(img, kernel_size=(5, 5), sigma=1.0, amount=1.0, threshold=0, mask=None):
+    """ Applies unsharp mask using PyTorch for potential GPU acceleration. """
     if amount == 0:
         return img
 
+    if not isinstance(img, np.ndarray):
+         logger.warning("unsharp_mask expects a NumPy array input.")
+         # Try to convert if PIL image
+         if isinstance(img, Image.Image):
+              img = np.array(img.convert('RGB')) # Assume RGB for conversion
+              if img is None: return None # Failed conversion
+         else:
+             return img # Return original if not numpy or PIL
+
+    # Determine device
+    # Avoid calling cuda.is_available frequently if possible
+    # Maybe pass device as arg or determine once globally?
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    img_tensor = torch.from_numpy(img).float().to(device)
-    blurred_tensor = cv2.GaussianBlur(img, kernel_size, sigma)
-    blurred_tensor = torch.from_numpy(blurred_tensor).float().to(device)
+    # Ensure image is uint8 before converting to float tensor
+    if img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
 
+
+    # Convert NumPy image (H, W, C) [assumed BGR or RGB] to Tensor (C, H, W) float
+    # Handle potential grayscale (H, W) input
+    if img.ndim == 3:
+        img_tensor = torch.from_numpy(img).permute(2, 0, 1).float().to(device) / 255.0
+    elif img.ndim == 2:
+        img_tensor = torch.from_numpy(img).unsqueeze(0).float().to(device) / 255.0 # Add channel dim
+    else:
+        logger.error(f"Unsupported image dimensions for unsharp_mask: {img.ndim}")
+        return img
+
+    channels, height, width = img_tensor.shape
+
+    # Gaussian Blur using TorchVision transforms
+    # kernel_size needs to be odd
+    k_h = kernel_size[0] if kernel_size[0] % 2 != 0 else kernel_size[0] + 1
+    k_w = kernel_size[1] if kernel_size[1] % 2 != 0 else kernel_size[1] + 1
+    gaussian_blur = TF.GaussianBlur(kernel_size=(k_h, k_w), sigma=sigma)
+    blurred_tensor = gaussian_blur(img_tensor)
+
+    # Calculate sharpened tensor
+    # amount = 1.0 means (2 * img - 1 * blurred)
     sharpened_tensor = (amount + 1.0) * img_tensor - amount * blurred_tensor
-    sharpened_tensor = torch.clamp(sharpened_tensor, 0, 255).round().to(torch.uint8)
 
+    # Apply threshold
     if threshold > 0:
-        low_contrast_mask = torch.abs(img_tensor - blurred_tensor) < threshold
+        # Threshold is typically applied in 0-255 range, adjust here for 0-1 range
+        threshold_norm = threshold / 255.0
+        low_contrast_mask = torch.abs(img_tensor - blurred_tensor) < threshold_norm
+        # Apply mask across channels if needed
+        if low_contrast_mask.shape[0] == 1 and channels > 1:
+            low_contrast_mask = low_contrast_mask.repeat(channels, 1, 1)
         sharpened_tensor = torch.where(low_contrast_mask, img_tensor, sharpened_tensor)
 
+    # Apply mask if provided
     if mask is not None:
-        mask_tensor = torch.from_numpy(np.array(mask)).to(device)
-        masked_sharpened = sharpened_tensor * mask_tensor
-        masked_img = img_tensor * (1 - mask_tensor)
-        sharpened_tensor = masked_sharpened + masked_img
+        try:
+            # Ensure mask is a PIL image, L mode, matching size
+            if not isinstance(mask, Image.Image): mask = Image.fromarray(mask) # Assume numpy if not PIL
+            if mask.mode != 'L': mask = mask.convert('L')
+            if mask.size != (width, height): mask = mask.resize((width, height), resample=Image.NEAREST)
 
-    return sharpened_tensor.cpu().numpy()
+            # Convert mask to tensor (1, H, W), normalize to 0-1
+            mask_tensor = TF.to_tensor(mask).to(device) # Should already be [0, 1] range
+
+            # Ensure mask_tensor has same number of channels for broadcasting if needed
+            # if mask_tensor.shape[0] == 1 and sharpened_tensor.shape[0] > 1:
+            #     mask_tensor = mask_tensor.repeat(sharpened_tensor.shape[0], 1, 1)
+
+            # Blend: sharpened * mask + original * (1 - mask)
+            sharpened_tensor = sharpened_tensor * mask_tensor + img_tensor * (1.0 - mask_tensor)
+
+        except Exception as e:
+            logger.error(f"Failed to apply mask in unsharp_mask: {e}")
+
+
+    # Clamp, convert back to numpy uint8
+    sharpened_tensor = torch.clamp(sharpened_tensor * 255.0, 0, 255).byte()
+
+    # Convert back to NumPy (H, W, C) or (H, W)
+    if sharpened_tensor.shape[0] == 3: # Color
+         output_img = sharpened_tensor.cpu().numpy().transpose(1, 2, 0)
+    elif sharpened_tensor.shape[0] == 1: # Grayscale
+         output_img = sharpened_tensor.cpu().numpy().squeeze(0)
+    else: # Should not happen
+         logger.error("Unexpected tensor shape after unsharp mask.")
+         return img
+
+    return output_img
+
+# --- Rest of the original functions ---
+
 def do_overlay_mask(args, anim_args, img, frame_idx, is_bgr_array=False):
+    """ Overlays init/video frame onto img using mask """
     current_mask = None
     current_frame = None
-    if is_bgr_array:
-        img = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(img)
+    img_pil = None # Work with PIL images internally
 
+    # Convert input img to PIL RGB if it's not already
+    if isinstance(img, Image.Image):
+        img_pil = img.convert('RGB') if img.mode != 'RGB' else img
+    elif isinstance(img, np.ndarray):
+        logger.info("Overlay: Input is NumPy array, converting to PIL.")
+        if is_bgr_array: # Input is BGR
+            img_pil = Image.fromarray(cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2RGB))
+        else: # Assume input is RGB
+            img_pil = Image.fromarray(img.astype(np.uint8))
+    else:
+        logger.error("Overlay: Unsupported input image type.")
+        return img # Return original if type is wrong
+
+    img_w, img_h = img_pil.size
+
+    # --- Load Mask ---
+    mask_source = None
     if anim_args.use_mask_video:
-        current_mask = Image.open(
-            os.path.join(args.outdir, 'maskframes', get_frame_name(anim_args.video_mask_path) + f"{frame_idx:09}.jpg"))
-        current_frame = Image.open(
-            os.path.join(args.outdir, 'inputframes', get_frame_name(anim_args.video_init_path) + f"{frame_idx:09}.jpg"))
+        mask_vid_path = getattr(anim_args, 'video_mask_path', None)
+        if mask_vid_path:
+            # Need function to get specific frame path from video path/folder
+            # Assuming maskframes are saved in args.outdir/maskframes/
+            mask_frame_name = get_frame_name(mask_vid_path) # Util function
+            mask_source = os.path.join(args.outdir, 'maskframes', mask_frame_name + f"{frame_idx:09}.jpg")
+            logger.info(f"Overlay: Loading mask frame: {mask_source}")
+        else: logger.warning("Overlay: use_mask_video is True, but video_mask_path is missing.")
     elif args.use_mask:
-        current_mask = args.mask_image if args.mask_image is not None else load_image(args.mask_file)
-        if args.init_image is None:
-            current_frame = img
-        else:
-            current_frame = load_image(args.init_image)
+        mask_source = getattr(args, 'mask_file', None)
+        logger.info(f"Overlay: Loading static mask file: {mask_source}")
+        # mask_image is sometimes preloaded in args? Check that.
+        if hasattr(args, 'mask_image') and args.mask_image is not None:
+             logger.info("Overlay: Using pre-loaded args.mask_image")
+             current_mask = args.mask_image # Assume it's a PIL image
+             mask_source = None # Don't load from file if pre-loaded exists
+
+    if mask_source:
+        try:
+            current_mask = load_image(mask_source) # Load as RGB first
+        except Exception as e:
+            logger.error(f"Overlay: Failed to load mask from {mask_source}: {e}")
+            current_mask = None
+
+    # --- Load Frame to Overlay ---
+    overlay_frame_source = None
+    if anim_args.use_mask_video: # If using video mask, use corresponding video init frame
+         init_vid_path = getattr(anim_args, 'video_init_path', None)
+         if init_vid_path:
+              init_frame_name = get_frame_name(init_vid_path)
+              overlay_frame_source = os.path.join(args.outdir, 'inputframes', init_frame_name + f"{frame_idx:09}.jpg")
+              logger.info(f"Overlay: Loading init frame: {overlay_frame_source}")
+         else: logger.warning("Overlay: use_mask_video is True, but video_init_path is missing.")
+    elif args.use_mask: # If using static mask
+         overlay_frame_source = getattr(args, 'init_image', None)
+         if overlay_frame_source:
+             logger.info(f"Overlay: Loading static init image: {overlay_frame_source}")
+         else: # If no init_image, overlay the input image itself (no change unless mask is inverted?)
+              logger.info("Overlay: No init_image specified, using input image for overlay (no effect unless mask inverted).")
+              current_frame = img_pil # Use the input image itself
+
+    if overlay_frame_source:
+        try:
+            current_frame = load_image(overlay_frame_source)
+        except Exception as e:
+            logger.error(f"Overlay: Failed to load overlay frame from {overlay_frame_source}: {e}")
+            current_frame = None
+
+    # --- Perform Overlay ---
     if current_mask is not None and current_frame is not None:
-        current_mask = current_mask.resize((args.width, args.height), Image.LANCZOS)
-        current_frame = current_frame.resize((args.width, args.height), Image.LANCZOS)
-        current_mask = ImageOps.grayscale(current_mask)
+        try:
+            # Prepare mask: Resize, convert to L, invert if needed
+            current_mask = current_mask.resize((img_w, img_h), Image.LANCZOS).convert('L')
+            if args.invert_mask:
+                current_mask = ImageOps.invert(current_mask)
 
-        if args.invert_mask:
-            current_mask = ImageOps.invert(current_mask)
+            # Prepare frame: Resize
+            current_frame = current_frame.resize((img_w, img_h), Image.LANCZOS).convert('RGB')
 
-        img = Image.composite(img, current_frame, current_mask)
+            # Composite: background=img_pil, foreground=current_frame, mask=current_mask
+            img_pil = Image.composite(current_frame, img_pil, current_mask)
+            logger.info("Overlay: Composite successful.")
 
+        except Exception as e:
+             logger.error(f"Overlay: Error during composition: {e}")
+             # Return original image on error during composite
+             if isinstance(img, Image.Image): return img
+             elif isinstance(img, np.ndarray): return img
+             else: return None # Should not happen
+
+    elif current_mask is None:
+        logger.warning("Overlay: Mask could not be loaded or prepared. Skipping overlay.")
+    elif current_frame is None:
+        logger.warning("Overlay: Frame to overlay could not be loaded or prepared. Skipping overlay.")
+
+
+    # Return in the original format if possible
+    if isinstance(img, Image.Image):
+        return img_pil
+    elif isinstance(img, np.ndarray):
         if is_bgr_array:
-            img = np.array(img)
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            # Convert final PIL RGB back to NumPy BGR
+            return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        else:
+            # Convert final PIL RGB back to NumPy RGB
+            return np.array(img_pil)
+    else:
+        return img_pil # Return PIL if original type unknown
 
-        # del (current_mask, current_frame)
-        # gc.collect()
 
-    return img
-
-
+# Function for composing masks based on string expressions
+# This seems complex and relies heavily on args and root object structure
+# Might need significant adaptation for ComfyUI context if used directly
 def compose_mask(root, args, mask_seq, val_masks, frame_image, inner_idx: int = 0):
-    # Compose_mask recursively: go to inner brackets, then b-op it and go upstack
+    """
+    Recursively parses a mask expression string (e.g., "<cat> & [mask.png] | (!{everywhere})" )
+    Requires 'root' object for word masks and 'args' for settings.
+    'val_masks' is a dict storing intermediate PIL mask results.
+    'frame_image' is the PIL image for word masking context.
+    Returns the key in val_masks containing the final composed mask.
+    """
+    if not isinstance(mask_seq, str):
+         logger.error("compose_mask: mask_seq must be a string.")
+         return None
 
-    # Step 1:
-    # recursive parenthesis pass
-    # regex is not powerful here
+    logger.info(f"Composing mask: {mask_seq} (Inner index: {inner_idx})")
 
+    # Predefined masks often available in val_masks
+    width = getattr(args, 'width', 512)
+    height = getattr(args, 'height', 512)
+    if 'everywhere' not in val_masks:
+         val_masks['everywhere'] = Image.new('1', (width, height), 1)
+    if 'nowhere' not in val_masks:
+          val_masks['nowhere'] = Image.new('1', (width, height), 0)
+
+
+    # --- Step 1: Recursive Parenthesis Pass ---
     seq = ""
     inner_seq = ""
     parentheses_counter = 0
-
-    for c in mask_seq:
-        if c == ')':
-            parentheses_counter = parentheses_counter - 1
-        if parentheses_counter > 0:
-            inner_seq += c
+    for char_idx, c in enumerate(mask_seq):
         if c == '(':
-            parentheses_counter = parentheses_counter + 1
-        if parentheses_counter == 0:
-            if len(inner_seq) > 0:
-                inner_idx += 1
-                seq += compose_mask(root, args, inner_seq, val_masks, frame_image, inner_idx)
-                inner_seq = ""
+            if parentheses_counter == 0: # Start of a new parenthesis block
+                inner_seq = "" # Reset inner sequence
             else:
-                seq += c
+                inner_seq += c # Part of nested parenthesis
+            parentheses_counter += 1
+        elif c == ')':
+            parentheses_counter -= 1
+            if parentheses_counter < 0:
+                raise ValueError(f"Mismatched closing parenthesis at index {char_idx} in mask sequence: {mask_seq}")
+            if parentheses_counter == 0: # End of a block
+                logger.debug(f"Processing parenthesis block: {inner_seq}")
+                # Recursively call compose_mask on the inner sequence
+                # Pass a unique key prefix or manage inner_idx carefully
+                # Need a way to generate unique keys for sub-results
+                new_key = f"sub_{inner_idx}_{len(val_masks)}" # Generate a temporary key
+                result_key = compose_mask(root, args, inner_seq, val_masks, frame_image, inner_idx + 1) # Recursive call
+                if result_key: # If recursion successful
+                    # Store the result of the parenthesis block with a placeholder key
+                    # This part is tricky - the original code replaces directly,
+                    # but tracking keys might be safer. Let's assume result_key is the final key for the sub-expression.
+                     seq += f"{{{result_key}}}" # Append placeholder for the evaluated block
+                else:
+                     logger.error("Recursive mask composition failed for block.")
+                     # Handle error, maybe raise exception or return None
+                     return None
+                inner_seq = "" # Reset inner sequence
+            else: # Still inside nested parenthesis
+                inner_seq += c
+        elif parentheses_counter > 0: # Inside parenthesis block
+            inner_seq += c
+        else: # Outside parenthesis
+            seq += c
 
     if parentheses_counter != 0:
-        raise Exception('Mismatched parentheses in {mask_seq}!')
+        raise ValueError(f"Mismatched opening parenthesis in mask sequence: {mask_seq}")
 
-    mask_seq = seq
+    mask_seq = seq # Sequence with evaluated parenthesis replaced by {key}
+    logger.debug(f"Mask sequence after parenthesis pass: {mask_seq}")
 
-    # Step 2:
-    # Load the word masks and file masks as vars
 
-    # File masks
-    pattern = r'\[(?P<inner>[\S\s]*?)\]'
+    # --- Step 2: Load File and Word Masks ---
+    # Replace [...] and <...> with {key} placeholders
 
-    def parse(match_object):
-        nonlocal inner_idx
-        inner_idx += 1
-        content = match_object.groupdict()['inner']
-        val_masks[str(inner_idx)] = get_mask_from_file(content, args).convert('1')  # TODO: add caching
-        return f"{{{inner_idx}}}"
+    # File masks: [filepath.png]
+    pattern_file = r'\[(?P<inner>[^\[\]]+?)\]' # Non-greedy match inside brackets
+    def parse_file(match_object):
+        nonlocal inner_idx # Use inner_idx passed to function
+        content = match_object.group('inner').strip()
+        logger.debug(f"Parsing file mask: [{content}]")
+        # Use content hash or unique ID for key to potentially reuse masks
+        file_key = f"file_{hash(content)}_{width}x{height}"
+        if file_key not in val_masks:
+             try:
+                 mask_img = get_mask_from_file(content, args) # Returns PIL 'L' mask
+                 if mask_img:
+                     val_masks[file_key] = mask_img.convert('1') # Convert to binary
+                 else: # Handle mask loading failure
+                      logger.warning(f"Could not load file mask: {content}. Using 'nowhere'.")
+                      val_masks[file_key] = val_masks['nowhere']
+             except Exception as e:
+                  logger.error(f"Error loading file mask [{content}]: {e}. Using 'nowhere'.")
+                  val_masks[file_key] = val_masks['nowhere']
+        return f"{{{file_key}}}"
+    mask_seq = re.sub(pattern_file, parse_file, mask_seq)
+    logger.debug(f"Mask sequence after file pass: {mask_seq}")
 
-    mask_seq = re.sub(pattern, parse, mask_seq)
 
-    # Word masks
-    pattern = r'<(?P<inner>[\S\s]*?)>'
+    # Word masks: <word or phrase>
+    pattern_word = r'<(?P<inner>[^<>]+?)>' # Non-greedy match inside angle brackets
+    def parse_word(match_object):
+        nonlocal inner_idx # Use inner_idx passed to function
+        content = match_object.group('inner').strip()
+        logger.debug(f"Parsing word mask: <{content}>")
+        # Key depends on content, image, etc. Hash might be complex. Use unique ID for now.
+        word_key = f"word_{inner_idx}_{len(val_masks)}_{content[:10]}" # Simple unique key
+        try:
+             # get_word_mask needs root object, image context
+             # This is a major dependency on the calling environment structure
+             if root is None: raise ValueError("'root' object needed for word masking is None.")
+             mask_img = get_word_mask(root, frame_image, content) # Assume returns PIL 'L' or '1'
+             if mask_img:
+                 val_masks[word_key] = mask_img.convert('1') # Ensure binary
+             else: # Handle word mask failure
+                  logger.warning(f"Word mask <{content}> returned None. Using 'nowhere'.")
+                  val_masks[word_key] = val_masks['nowhere']
+        except Exception as e:
+            logger.error(f"Error generating word mask <{content}>: {e}. Using 'nowhere'.")
+            val_masks[word_key] = val_masks['nowhere']
+        return f"{{{word_key}}}"
+    mask_seq = re.sub(pattern_word, parse_word, mask_seq)
+    logger.debug(f"Mask sequence after word pass: {mask_seq}")
 
-    def parse(match_object):
-        nonlocal inner_idx
-        inner_idx += 1
-        content = match_object.groupdict()['inner']
-        val_masks[str(inner_idx)] = get_word_mask(root, frame_image, content).convert('1')
-        return f"{{{inner_idx}}}"
 
-    mask_seq = re.sub(pattern, parse, mask_seq)
+    # --- Step 3: Boolean Operations ---
+    # Order of operations matters: !, &, ^, \, | (Example: NOT, AND, XOR, DIFF, OR)
 
-    # Now that all inner parenthesis are eliminated we're left with a linear string
+    # Helper to get mask from val_masks, ensures it's PIL '1'
+    def get_mask_by_key(key):
+        mask = val_masks.get(key)
+        if mask is None:
+             logger.error(f"Mask key '{key}' not found in val_masks!")
+             return val_masks.get('nowhere', Image.new('1', (width, height), 0)) # Fallback
+        if not isinstance(mask, Image.Image):
+             logger.error(f"Value for key '{key}' is not a PIL Image!")
+             return val_masks.get('nowhere', Image.new('1', (width, height), 0))
+        if mask.mode != '1':
+             return mask.convert('1') # Ensure binary mode
+        return mask
 
-    # Step 3:
-    # Boolean operations with masks
-    # Operators: invert !, and &, or |, xor ^, difference \
-
-    # Invert vars with '!'
-    pattern = r'![\S\s]*{(?P<inner>[\S\s]*?)}'
-
-    def parse(match_object):
-        nonlocal inner_idx
-        inner_idx += 1
-        content = match_object.groupdict()['inner']
-        savename = content
-        if content in root.mask_preset_names:
-            inner_idx += 1
-            savename = str(inner_idx)
-        val_masks[savename] = ImageChops.invert(val_masks[content])
-        return f"{{{savename}}}"
-
-    mask_seq = re.sub(pattern, parse, mask_seq)
-
-    # Multiply neighbouring vars with '&'
-    # Wait for replacements stall (like in Markov chains)
+    # Invert '!' operator: !{key}
+    # Process repeatedly until no more inversions are found
     while True:
-        pattern = r'{(?P<inner1>[\S\s]*?)}[\s]*&[\s]*{(?P<inner2>[\S\s]*?)}'
+         pattern_invert = r'!\s*{?(?P<key>[^}\s]+)}?' # Match ! followed by optional {key} or just key
+         match = re.search(pattern_invert, mask_seq)
+         if not match: break
 
-        def parse(match_object):
-            nonlocal inner_idx
-            inner_idx += 1
-            content = match_object.groupdict()['inner1']
-            content_second = match_object.groupdict()['inner2']
-            savename = content
-            if content in root.mask_preset_names:
-                inner_idx += 1
-                savename = str(inner_idx)
-            val_masks[savename] = ImageChops.logical_and(val_masks[content], val_masks[content_second])
-            return f"{{{savename}}}"
+         key_to_invert = match.group('key')
+         logger.debug(f"Processing invert: !{{{key_to_invert}}}")
+         original_mask = get_mask_by_key(key_to_invert)
+         inverted_key = f"inv_{key_to_invert}" # New key for inverted mask
+         if inverted_key not in val_masks:
+             val_masks[inverted_key] = ImageChops.invert(original_mask)
 
-        prev_mask_seq = mask_seq
-        mask_seq = re.sub(pattern, parse, mask_seq)
-        if mask_seq is prev_mask_seq:
-            break
+         # Replace the pattern with the new key
+         mask_seq = mask_seq[:match.start()] + f"{{{inverted_key}}}" + mask_seq[match.end():]
+         logger.debug(f"Mask sequence after invert pass: {mask_seq}")
 
-    # Add neighbouring vars with '|'
-    while True:
-        pattern = r'{(?P<inner1>[\S\s]*?)}[\s]*?\|[\s]*?{(?P<inner2>[\S\s]*?)}'
 
-        def parse(match_object):
-            nonlocal inner_idx
-            inner_idx += 1
-            content = match_object.groupdict()['inner1']
-            content_second = match_object.groupdict()['inner2']
-            savename = content
-            if content in root.mask_preset_names:
-                inner_idx += 1
-                savename = str(inner_idx)
-            val_masks[savename] = ImageChops.logical_or(val_masks[content], val_masks[content_second])
-            return f"{{{savename}}}"
+    # Process binary operators in order (&, ^, \, |)
+    operators = ['&', '^', '\\', '|'] # Define precedence / processing order
+    op_functions = {
+        '&': ImageChops.logical_and,
+        '^': ImageChops.logical_xor,
+        '\\': lambda m1, m2: ImageChops.logical_and(m1, ImageChops.invert(m2)), # Difference A \ B = A & !B
+        '|': ImageChops.logical_or,
+    }
 
-        prev_mask_seq = mask_seq
-        mask_seq = re.sub(pattern, parse, mask_seq)
-        if mask_seq is prev_mask_seq:
-            break
+    for op in operators:
+        logger.debug(f"Processing operator: {op}")
+        # Need robust regex to handle {key1} op {key2}
+        # Escape backslash for regex pattern
+        op_escaped = re.escape(op)
+        pattern_op = r'{?(?P<key1>[^}\s]+)}?\s*' + op_escaped + r'\s*{?(?P<key2>[^}\s]+)}?'
 
-    # Mutually exclude neighbouring vars with '^'
-    while True:
-        pattern = r'{(?P<inner1>[\S\s]*?)}[\s]*\^[\s]*{(?P<inner2>[\S\s]*?)}'
+        while True: # Process all occurrences of this operator
+             match = re.search(pattern_op, mask_seq)
+             if not match: break # No more occurrences of this operator
 
-        def parse(match_object):
-            nonlocal inner_idx
-            inner_idx += 1
-            content = match_object.groupdict()['inner1']
-            content_second = match_object.groupdict()['inner2']
-            savename = content
-            if content in root.mask_preset_names:
-                inner_idx += 1
-                savename = str(inner_idx)
-            val_masks[savename] = ImageChops.logical_xor(val_masks[content], val_masks[content_second])
-            return f"{{{savename}}}"
+             key1 = match.group('key1')
+             key2 = match.group('key2')
+             logger.debug(f"Processing op {op}: {{{key1}}} {op} {{{key2}}}")
 
-        prev_mask_seq = mask_seq
-        mask_seq = re.sub(pattern, parse, mask_seq)
-        if mask_seq is prev_mask_seq:
-            break
+             mask1 = get_mask_by_key(key1)
+             mask2 = get_mask_by_key(key2)
 
-    # Set-difference the regions with '\'
-    while True:
-        pattern = r'{(?P<inner1>[\S\s]*?)}[\s]*\\[\s]*{(?P<inner2>[\S\s]*?)}'
+             result_key = f"res_{len(val_masks)}_{key1}_{op}_{key2}" # Generate unique key for result
+             try:
+                 result_mask = op_functions[op](mask1, mask2)
+                 val_masks[result_key] = result_mask
+             except Exception as e:
+                 logger.error(f"Error applying operator {op} between {key1} and {key2}: {e}")
+                 # Fallback to 'nowhere' or skip? For now, use 'nowhere' for safety.
+                 val_masks[result_key] = val_masks['nowhere']
 
-        def parse(match_object):
-            content = match_object.groupdict()['inner1']
-            content_second = match_object.groupdict()['inner2']
-            savename = content
-            if content in root.mask_preset_names:
-                nonlocal inner_idx
-                inner_idx += 1
-                savename = str(inner_idx)
-            val_masks[savename] = ImageChops.logical_and(val_masks[content],
-                                                         ImageChops.invert(val_masks[content_second]))
-            return f"{{{savename}}}"
 
-        prev_mask_seq = mask_seq
-        mask_seq = re.sub(pattern, parse, mask_seq)
-        if mask_seq is prev_mask_seq:
-            break
+             # Replace the matched expression with the result key
+             mask_seq = mask_seq[:match.start()] + f"{{{result_key}}}" + mask_seq[match.end():]
+             logger.debug(f"Mask sequence after {op} pass: {mask_seq}")
 
-    # Step 4:
-    # Output
-    # Now we should have a single var left to return. If not, raise an error message
-    pattern = r'{(?P<inner>[\S\s]*?)}'
-    matches = re.findall(pattern, mask_seq)
 
-    if len(matches) != 1:
-        raise Exception(f'Wrong composable mask expression format! Broken mask sequence: {mask_seq}')
+    # --- Step 4: Output ---
+    # Should be left with a single {final_key}
+    final_pattern = r'^\s*{?(?P<final_key>[^}\s]+)}?\s*$'
+    final_match = re.match(final_pattern, mask_seq)
 
-    return f"{{{matches[0]}}}"
+    if final_match:
+        final_key = final_match.group('final_key')
+        logger.info(f"Mask composition finished. Final key: {final_key}")
+        # Return the key itself, caller uses get_mask_by_key(key)
+        return final_key
+    else:
+        logger.error(f"Mask composition did not result in a single key. Final sequence: {mask_seq}")
+        # Fallback or raise error
+        # Try to find any remaining key as a desperate measure?
+        fallback_match = re.search(r'{?(?P<key>[^}\s]+)}?', mask_seq)
+        if fallback_match:
+             logger.warning("Falling back to first found key in sequence.")
+             return fallback_match.group('key')
+        else:
+             logger.error("Could not find any valid key in final mask sequence.")
+             return None # Indicate failure
 
 
 def compose_mask_with_check(root, args, mask_seq, val_masks, frame_image):
-    for k, v in val_masks.items():
-        val_masks[k] = blank_if_none(v, args.width, args.height, '1').convert('1')
-    return check_mask_for_errors(
-        val_masks[compose_mask(root, args, mask_seq, val_masks, frame_image, 0)[1:-1]].convert('L'))
+    """ Wrapper for compose_mask that returns the final PIL mask ('L' mode) """
+    width = getattr(args, 'width', 512)
+    height = getattr(args, 'height', 512)
+
+    # Ensure predefined masks exist and are PIL Images ('1' mode)
+    for k, v in list(val_masks.items()): # Use list to allow modification during iteration if needed (though usually not)
+         if not isinstance(v, Image.Image):
+             logger.warning(f"Value for key '{k}' in initial val_masks is not PIL Image. Replacing with blank.")
+             val_masks[k] = Image.new('1', (width, height), 0)
+         elif v.mode != '1':
+             val_masks[k] = v.convert('1') # Ensure binary
+
+    if 'everywhere' not in val_masks: val_masks['everywhere'] = Image.new('1', (width, height), 1)
+    if 'nowhere' not in val_masks: val_masks['nowhere'] = Image.new('1', (width, height), 0)
+
+    try:
+        final_key = compose_mask(root, args, mask_seq, val_masks, frame_image, 0)
+        if final_key:
+            final_mask_binary = val_masks.get(final_key)
+            if final_mask_binary and isinstance(final_mask_binary, Image.Image):
+                 # Convert final binary mask ('1') to grayscale ('L') for general use
+                 final_mask_L = final_mask_binary.convert('L')
+                 # Optional: Check the final mask
+                 # checked_mask = check_mask_for_errors(final_mask_L, getattr(args, 'invert_mask', False))
+                 # return checked_mask
+                 return final_mask_L
+            else:
+                 logger.error(f"Final key '{final_key}' did not yield a valid PIL mask.")
+                 return Image.new('L', (width, height), 0) # Return blank mask on failure
+        else:
+            logger.error("Mask composition failed to return a final key.")
+            return Image.new('L', (width, height), 0) # Return blank mask on failure
+
+    except ValueError as e: # Catch parsing errors like mismatched parenthesis
+         logger.error(f"Error during mask composition (ValueError): {e}")
+         return Image.new('L', (width, height), 0)
+    except Exception as e: # Catch other unexpected errors
+         logger.error(f"Unexpected error during mask composition: {e}")
+         return Image.new('L', (width, height), 0)
 
 
 def get_output_folder(output_path, batch_folder):
-    out_path = os.path.join(output_path, time.strftime('%Y-%m'))
-    if batch_folder != "":
-        out_path = os.path.join(out_path, batch_folder)
-    os.makedirs(out_path, exist_ok=True)
-    return out_path
+    """ Creates and returns the output folder path based on date and batch name. """
+    # Use current date based on system time when function is called
+    try:
+         # Ensure base output path exists
+         if not os.path.exists(output_path):
+              os.makedirs(output_path, exist_ok=True)
+              logger.info(f"Created base output directory: {output_path}")
 
+         # Create date-based subfolder (YYYY-MM)
+         date_folder = time.strftime('%Y-%m')
+         date_path = os.path.join(output_path, date_folder)
+         if not os.path.exists(date_path):
+              os.makedirs(date_path, exist_ok=True)
+              logger.info(f"Created date directory: {date_path}")
 
-import os
-from multiprocessing import Process
+         # Create batch-specific subfolder if provided
+         if batch_folder is not None and batch_folder.strip() != "":
+              # Sanitize batch_folder name (optional, remove invalid chars)
+              # safe_batch_folder = re.sub(r'[\\/*?:"<>|]', "_", batch_folder) # Basic sanitize
+              final_path = os.path.join(date_path, batch_folder)
+         else:
+              final_path = date_path
 
+         if not os.path.exists(final_path):
+              os.makedirs(final_path, exist_ok=True)
+              logger.info(f"Ensured final output directory exists: {final_path}")
 
-def save_image_thread(image, path, cls):
-    # Save the image directly
+         return final_path
 
+    except Exception as e:
+         logger.error(f"Error creating output folder structure: {e}")
+         # Fallback to base output path if creation fails
+         return output_path
 
-    # if cls.gen.color_match_sample is not None:
-    #
-    #     logger.info("Applying subtle color correction.")
-    #     sample = cls.gen.color_match_sample
-    #     original_image = image
-    #     original_lab = cv2.cvtColor(np.asarray(original_image), cv2.COLOR_RGB2LAB)
-    #     correction = cv2.cvtColor(sample, cv2.COLOR_RGB2LAB)
-    #
-    #     corrected_lab = match_histograms(original_lab, correction, channel_axis=2)
-    #     corrected_image = cv2.cvtColor(corrected_lab, cv2.COLOR_LAB2RGB).astype("uint8")
-    #
-    #     corrected_pil_image = Image.fromarray(corrected_image)
-    #     blended_image = blendLayers(corrected_pil_image, original_image, BlendType.LUMINOSITY,
-    #                                 opacity=cls.gen.colorCorrectionFactor)
-    #
-    #     image = blended_image.convert('RGB')
+# --- Image Saving Functions ---
 
-    image.save(path, "PNG")
+# Thread target function for saving
+def save_image_thread(image, path):
+    """ Saves a PIL Image object to the specified path. """
+    try:
+        # Ensure directory exists right before saving
+        dir_path = os.path.dirname(path)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
 
+        image.save(path, "PNG") # Save as PNG by default
+        logger.info(f"Saved image to {path}")
+    except Exception as e:
+        logger.error(f"Error saving image in thread to {path}: {e}")
+
+# Main save_image function (using threading)
 def save_image(image, image_type, filename, args, video_args, root, cls=None):
-    if video_args.store_frames_in_ram:
-        # Storing in RAM as an alternative
-        root.frames_cache.append({
-            'path': os.path.join(args.outdir, filename),
-            'image': image,
-            'image_type': image_type
-        })
+    """ Saves an image (PIL or CV2) to disk, potentially using threading. """
+    # 'cls' argument seems unused here, removed from thread args unless needed later
+
+    outdir = getattr(args, 'outdir', '.') # Get output directory from args
+    store_in_ram = getattr(video_args, 'store_frames_in_ram', False)
+
+    # Convert image to PIL if it's not already (needed for saving and RAM cache)
+    img_pil = None
+    if isinstance(image, Image.Image):
+        img_pil = image.copy() # Work with a copy
+    elif isinstance(image, np.ndarray):
+        try:
+            # Assume BGR if image_type hints at cv2, otherwise assume RGB
+            if image_type == 'cv2': # Heuristic, might be wrong
+                 img_pil = Image.fromarray(cv2.cvtColor(image.astype(np.uint8), cv2.COLOR_BGR2RGB))
+            else: # Assume RGB
+                 img_pil = Image.fromarray(image.astype(np.uint8))
+        except Exception as e:
+             logger.error(f"Failed to convert NumPy image to PIL for saving: {e}")
+             return # Don't save if conversion fails
     else:
-        # Construct the full path where the image will be saved
-        full_path = os.path.join(args.outdir, filename)
+        logger.error(f"Unsupported image type for saving: {type(image)}")
+        return
 
-        # Create a new thread for saving the image
-        thread = Thread(target=save_image_thread, args=(image, full_path, cls))
 
-        # Start the thread
-        thread.start()
-# def save_image_subprocess(image, path):
-#     # Save the image at the specified path
-#     image.save(path)
-#
-# def save_image(image, image_type, filename, args, video_args, root):
-#     if video_args.store_frames_in_ram:
-#         return
-#         # You can uncomment the following lines if you need to cache the frames instead of saving them directly
-#         # root.frames_cache.append(
-#         #     {'path': os.path.join(args.outdir, filename), 'image': image, 'image_type': image_type})
-#     else:
-#         # Construct the full path where the image will be saved
-#         full_path = os.path.join(args.outdir, filename)
-#
-#         # Create a new process for saving the image
-#         process = Process(target=save_image_subprocess, args=(image, full_path))
-#
-#         # Start the process
-#         process.start()
+    if store_in_ram:
+        if hasattr(root, 'frames_cache') and isinstance(root.frames_cache, list):
+            # Store PIL image in RAM cache
+            logger.info(f"Storing frame in RAM cache: {filename}")
+            root.frames_cache.append({
+                'path': os.path.join(outdir, filename), # Store intended path
+                'image': img_pil, # Store the PIL image itself
+                'image_type': 'PIL' # Standardize cache type
+            })
+        else:
+            logger.warning("store_frames_in_ram is True, but root.frames_cache is not available or not a list.")
+            # Optionally save to disk as fallback? For now, just warn.
+    else:
+        # Save to disk using a separate thread
+        full_path = os.path.join(outdir, filename)
+        logger.info(f"Queueing image save to disk (threaded): {full_path}")
+
+        # Create and start the thread
+        try:
+            thread = Thread(target=save_image_thread, args=(img_pil, full_path))
+            thread.start()
+            # Optionally store thread handles if you need to join them later
+            # if not hasattr(root, 'save_threads'): root.save_threads = []
+            # root.save_threads.append(thread)
+        except Exception as e:
+             logger.error(f"Failed to start save thread for {full_path}: {e}")
+             # Fallback: save directly in main thread? (Could block)
+             # try:
+             #     logger.warning("Save thread failed, saving directly.")
+             #     save_image_thread(img_pil, full_path)
+             # except Exception as e2:
+             #     logger.error(f"Direct save fallback also failed: {e2}")
 
 
 def reset_frames_cache(root):
-    root.frames_cache = []
-    gc.collect()
+    if hasattr(root, 'frames_cache'):
+        logger.info(f"Resetting frames cache (clearing {len(root.frames_cache)} items).")
+        root.frames_cache = []
+    gc.collect() # Trigger garbage collection
 
 
 def dump_frames_cache(root):
-    for image_cache in root.frames_cache:
-        if image_cache['image_type'] == 'cv2':
-            cv2.imwrite(image_cache['path'], image_cache['image'])
-        elif image_cache['image_type'] == 'PIL':
-            image_cache['image'].save(image_cache['path'])
-    # do not reset the cache since we're going to add frame erasing later function #TODO
+    """ Saves all frames stored in root.frames_cache to disk. """
+    if hasattr(root, 'frames_cache') and isinstance(root.frames_cache, list):
+        num_frames = len(root.frames_cache)
+        logger.info(f"Dumping {num_frames} frames from RAM cache to disk...")
+        # Save sequentially for simplicity, threading might be complex here
+        saved_count = 0
+        for i, image_cache in enumerate(root.frames_cache):
+            try:
+                 path = image_cache.get('path')
+                 image = image_cache.get('image') # Should be PIL image
+                 if path and image and isinstance(image, Image.Image):
+                     # Save using the thread function structure, but run directly here
+                     save_image_thread(image, path) # This saves directly
+                     saved_count += 1
+                     # Optional: Log progress
+                     if (i + 1) % 50 == 0 or (i + 1) == num_frames:
+                          logger.info(f"Dumped {i+1}/{num_frames} frames...")
+                 else:
+                      logger.warning(f"Invalid cache entry at index {i}. Skipping dump.")
+            except Exception as e:
+                 logger.error(f"Error dumping frame {i} ({path}) from cache: {e}")
+
+        logger.info(f"Finished dumping cache. Successfully saved {saved_count}/{num_frames} frames.")
+        # Optionally clear cache after dumping?
+        # reset_frames_cache(root)
+    else:
+         logger.info("No frame cache found or cache is not a list. Nothing to dump.")
 
 
-def extend_flow(flow, w, h):
-    # Get the shape of the original flow image
+# --- Flow/Remapping Functions (Originals) ---
+
+def extend_flow(flow, target_w, target_h):
+    """ Extends a smaller flow field to fit a larger target dimension by centering it. """
     flow_h, flow_w = flow.shape[:2]
-    # Calculate the position of the image in the new image
-    x_offset = int((w - flow_w) / 2)
-    y_offset = int((h - flow_h) / 2)
-    # Generate the X and Y grids
-    x_grid, y_grid = np.meshgrid(np.arange(w), np.arange(h))
-    # Create the new flow image and set it to the X and Y grids
-    new_flow = np.dstack((x_grid, y_grid)).astype(np.float32)
-    # Shift the values of the original flow by the size of the border
-    flow[:, :, 0] += x_offset
-    flow[:, :, 1] += y_offset
-    # Overwrite the middle of the grid with the original flow
+
+    if flow_h >= target_h and flow_w >= target_w:
+         # Flow is already larger or equal, just crop it
+         logger.warning("extend_flow called with flow larger than target. Cropping.")
+         return center_crop_image(flow, target_w, target_h)
+
+    # Calculate offsets to center the original flow
+    x_offset = max(0, (target_w - flow_w) // 2)
+    y_offset = max(0, (target_h - flow_h) // 2)
+
+    # Create base grid matching target dimensions (represents no flow initially)
+    x_grid, y_grid = np.meshgrid(np.arange(target_w), np.arange(target_h))
+    # new_flow = np.dstack((x_grid, y_grid)).astype(np.float32) # This is map, not flow!
+    # Flow represents displacement, so extended area should have zero flow
+    new_flow = np.zeros((target_h, target_w, 2), dtype=np.float32)
+
+
+    # Adjust original flow vectors by the offset BEFORE placing them
+    # flow_copy = flow.copy() # Important to modify a copy
+    # flow_copy[:, :, 0] += x_offset # This is incorrect logic for flow vectors
+    # flow_copy[:, :, 1] += y_offset # Flow vectors are relative displacements
+
+    # Place the original flow vectors into the center of the new zero-flow field
     new_flow[y_offset:y_offset + flow_h, x_offset:x_offset + flow_w, :] = flow
-    # Return the extended image
+
     return new_flow
 
 
-def remap(img,
-          flow):
-    border_mode = cv2.BORDER_REFLECT_101
+def remap(img, flow_map):
+    """ Remaps image pixels based on a flow map using reflection padding. """
+    # flow_map should be the absolute coordinates [map_x, map_y]
     h, w = img.shape[:2]
-    displacement = int(h * 0.25), int(w * 0.25)
-    larger_img = cv2.copyMakeBorder(img, displacement[0], displacement[0], displacement[1], displacement[1],
-                                    border_mode)
-    lh, lw = larger_img.shape[:2]
-    larger_flow = extend_flow(flow, lw, lh)
-    remapped_img = cv2.remap(larger_img, larger_flow, None, cv2.INTER_LINEAR, border_mode)
-    output_img = center_crop_image(remapped_img, w, h)
-    return output_img
+
+    # Check if flow_map dimensions match image dimensions
+    map_h, map_w = flow_map.shape[:2]
+    if h != map_h or w != map_w:
+        logger.warning(f"Remap: Image shape {img.shape[:2]} and flow map shape {flow_map.shape[:2]} mismatch. Resizing map.")
+        # Resize flow_map (absolute coordinates map)
+        map_x = cv2.resize(flow_map[:,:,0], (w, h), interpolation=cv2.INTER_LINEAR)
+        map_y = cv2.resize(flow_map[:,:,1], (w, h), interpolation=cv2.INTER_LINEAR)
+        flow_map = np.dstack((map_x, map_y))
+
+
+    # The original code used copyMakeBorder + extend_flow + remap + center_crop.
+    # This seems overly complex if cv2.remap handles borders correctly.
+    # Let's try direct remapping with border reflection.
+    border_mode = cv2.BORDER_REFLECT_101
+
+    # Ensure flow_map is float32
+    if flow_map.dtype != np.float32:
+        flow_map = flow_map.astype(np.float32)
+
+    # Separate map_x and map_y for cv2.remap
+    map_x, map_y = flow_map[:, :, 0], flow_map[:, :, 1]
+
+    remapped_img = cv2.remap(img, map_x, map_y,
+                           interpolation=cv2.INTER_LINEAR,
+                           borderMode=border_mode)
+
+    return remapped_img
+
+
+# --- End of image_utils.py ---
