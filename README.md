@@ -1,6 +1,6 @@
 # Fork Version
 
-This repository is designed to test compatibility with Python 3.12 and PyTorch 2.6.0+cu12.6.
+This repository is designed to test compatibility with Python 3.10, 3.12 and PyTorch 2.6.0+cu12.6.
 
 To resolve import errors with ComfyUI Deforum nodes, use the following command:
  ```bash
