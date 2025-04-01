@@ -9,8 +9,8 @@ os_name = platform.system().lower()
 
 torch_package_urls = {
     '3.10': {
-        'linux': 'torch-2.3.0%2Bcu121-cp310-cp310-linux_x86_64.whl',
-        'windows': 'torch-2.3.0%2Bcu121-cp310-cp310-win_amd64.whl'
+        'linux': 'torch-2.6.0%2Bcu126-cp310-cp310-linux_x86_64.whl',
+        'windows': 'torch-2.6.0%2Bcu126-cp310-cp310-win_amd64.whl'
     },
     '3.11': {
         'linux': 'torch-2.3.0%2Bcu121-cp311-cp311-linux_x86_64.whl',
@@ -32,8 +32,8 @@ torch_package_urls = {
 
 torchvision_package_urls = {
     '3.10': {
-        'linux': 'torchvision-0.18.0%2Bcu121-cp310-cp310-linux_x86_64.whl',
-        'windows': 'torchvision-0.18.0%2Bcu121-cp310-cp310-win_amd64.whl'
+        'linux': 'torchvision-0.21.0%2Bcu126-cp310-cp310-linux_x86_64.whl',
+        'windows': 'torchvision-0.21.0%2Bcu126-cp310-cp310-win_amd64.whl'
     },
     '3.11': {
         'linux': 'torchvision-0.18.0%2Bcu121-cp311-cp311-linux_x86_64.whl',
