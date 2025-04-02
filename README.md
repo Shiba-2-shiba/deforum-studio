@@ -7,6 +7,11 @@ To resolve import errors with ComfyUI Deforum nodes, use the following command:
 pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git  
  ```
 
+You can also install in Stability Matrix
+ ```bash
+"(Your directory)\StabilityMatrix\Data\Packages\ComfyUI\venv\Scripts\python.exe" -m pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git
+ ```
+
 # Deforum
 State-of-the-art Animation Diffusion in PyTorch and TRT.
 
