@@ -59,9 +59,21 @@ if python_version in torch_package_urls:
 else:
     sys.exit(f"Unsupported Python version: {python_version}")
 
-cuda_version = "cu126" if python_version == "3.12" else "cu124"
-torch_path = f"https://download.pytorch.org/whl/{cuda_version}/{torch_url}"
-torchvision_path = f"https://download.pytorch.org/whl/{cuda_version}/{torchvision_url}"
+# cuda_version = "cu126" if python_version == "3.12" else "cu124"
+# torch_path = f"https://download.pytorch.org/whl/{cuda_version}/{torch_url}"
+# torchvision_path = f"https://download.pytorch.org/whl/{cuda_version}/{torchvision_url}"
+
+# torch_url (ファイル名) から CUDA バージョンを抽出
+match = re.search(r'cu(\d+\.?\d*)', torch_url) # 'cu' に続く数字 (小数点含む) を探す
+if match:
+    cuda_version_str = f"cu{match.group(1)}" # 例: 'cu126' や 'cu121' が取得される
+    # 抽出した CUDA バージョンを URL パスに使用
+    torch_path = f"https://download.pytorch.org/whl/{cuda_version_str}/{torch_url}"
+    # torchvision も同じ CUDA パスを使うと仮定
+    torchvision_path = f"https://download.pytorch.org/whl/{cuda_version_str}/{torchvision_url}"
+else:
+    # ファイル名から CUDA バージョンが見つからない場合のエラー処理
+    sys.exit(f"Could not determine CUDA version from torch URL filename: {torch_url}")
 
 # IMPORTANT:
 # 1. all dependencies should be listed here with their version requirements if any
