@@ -37,7 +37,6 @@ _deps = [
     'python-decouple>=3.8',
     'mutagen>=1.47.0',
     'imageio[ffmpeg]>=2.34.1',
-    'xformers>=0.0.26.post1',
     # 'tensorrt>=10.0.1', # Optional/Commented out dependencies
     # 'onnx_graphsurgeon>=0.5.2',
     # 'onnx>=1.16.0',
@@ -78,7 +77,7 @@ install_requires_packages = [
     'rich', 'gdown', 'py3d', 'librosa', 'numpy', 'opencv-python-headless',
     'timm', 'transformers', 'omegaconf', 'aiohttp', 'psutil', 'clip-interrogator',
     'streamlit', 'torchsde', 'fastapi', 'diffusers', 'accelerate', 'python-decouple',
-    'mutagen', 'imageio[ffmpeg]', 'xformers', 'kornia', 'wheel', 'loguru',
+    'mutagen', 'imageio[ffmpeg]', 'kornia', 'wheel', 'loguru',
     'scikit-image', 'scipy', 'segment-anything', 'piexif', 'GitPython', 'qtpy',
     'pyqt6', 'pyqt6-qt6', 'pyqtgraph', 'contexttimer', 'PyWavelets',
     'opensimplex', 'moviepy', 'color-matcher', 'pydub'
