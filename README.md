@@ -2,15 +2,58 @@
 
 This repository is designed to test compatibility with Python 3.10, 3.12 and PyTorch 2.6.0+cu12.6.
 
-To resolve import errors with ComfyUI Deforum nodes, use the following command:
- ```bash
-pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git  
- ```
+## Installation
 
-You can also install in Stability Matrix
- ```bash
-"(Your directory)\StabilityMatrix\Data\Packages\ComfyUI\venv\Scripts\python.exe" -m pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git
- ```
+### 1. Standard pip install
+
+Use your system or virtual environment Python:
+
+```bash
+pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git
+```
+
+### 2. Installing within Stability Matrix (Windows)
+
+If you run ComfyUI under Stability Matrix on Windows, install directly into the embedded Python:
+
+```bash
+"<YourPath>\StabilityMatrix\Data\Packages\ComfyUI\venv\Scripts\python.exe" \
+  -m pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git
+```
+
+### 3. Fixing Windows „pims“ build errors
+
+Some Windows setups use a zipped `distutils` and fail to build `pims>=0.6.1`. To avoid build errors, extract a live copy of `distutils` and pre-install dependencies:
+
+1. Change to your venv folder:
+
+   ```bat
+   cd /d <YourPath>\StabilityMatrix\Data\Packages\ComfyUI\venv
+   ```
+
+2. Expand `python310.zip` to a local `_distutils` directory:
+
+   ```bat
+   powershell -Command "Expand-Archive -Path Scripts\python310.zip -DestinationPath Lib\_distutils -Force"
+   ```
+
+3. Upgrade build tools:
+
+   ```bat
+   Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+   ```
+
+4. Pre-install binary-compatible `pims` and other dependencies:
+
+   ```bat
+   Scripts\python.exe -m pip install pims==0.6.1 pandas numexpr simpleeval
+   ```
+
+5. Finally, install Deforum Studio without re-building dependencies:
+
+   ```bat
+   Scripts\python.exe -m pip install --no-deps git+https://github.com/Shiba-2-shiba/deforum-studio.git
+   ```
 
 # Deforum
 State-of-the-art Animation Diffusion in PyTorch and TRT.
