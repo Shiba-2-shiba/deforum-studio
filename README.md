@@ -46,7 +46,8 @@ Some Windows setups use a zipped `distutils` and fail to build `pims>=0.6.1`. To
 4. Pre-install binary-compatible `pims` and other dependencies:
 
    ```bat
-   Scripts\python.exe -m pip install pims==0.6.1 pandas numexpr simpleeval
+   Scripts\python.exe -m pip install pims==0.7 pandas numexpr simpleeval pydub loguru clip-interrogator contexttimer librosa mutagen py3d pyqt6 pyqt6-qt6 pyqtgraph python-decouple qtpy streamlit moviepy==1.0.3
+
    ```
 
 5. Finally, install Deforum Studio without re-building dependencies:
