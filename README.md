@@ -16,12 +16,10 @@ pip install git+https://github.com/Shiba-2-shiba/deforum-studio.git
 >
 > ````bash
 > pip install pims==0.7 pandas numexpr simpleeval pydub loguru clip-interrogator contexttimer librosa mutagen py3d pyqt6 pyqt6-qt6 pyqtgraph python-decouple qtpy streamlit moviepy==1.0.3
-> ```bash
+>
+> pip install git+[https://github.com/Shiba-2-shiba/deforum-studio.git](https://github.com/Shiba-2-shiba/deforum-studio.git)
 > ````
 
-pip install git+[https://github.com/Shiba-2-shiba/deforum-studio.git](https://github.com/Shiba-2-shiba/deforum-studio.git)
-
-````
 
 ### 2. Installing within Stability Matrix (Windows)
 
