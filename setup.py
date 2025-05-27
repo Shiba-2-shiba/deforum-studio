@@ -56,7 +56,7 @@ _deps = [
     'contexttimer>=0.3.3',
     # 'PyWavelets>=1.1.1',
     # 'opensimplex>=0.4.2',
-    # 'moviepy==1.0.3',
+    # 'moviepy',
     # 'color-matcher>=0.5.0',
     'pydub>=0.23.0'
 ]
